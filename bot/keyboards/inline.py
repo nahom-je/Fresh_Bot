@@ -1,0 +1,93 @@
+from collections.abc import Sequence
+
+from aiogram.types import InlineKeyboardButton as Btn
+from aiogram.types import InlineKeyboardMarkup
+
+from bot.db.models import Material
+from bot.utils.constants import CATEGORIES
+
+
+def _grid(buttons: list[Btn], cols: int) -> list[list[Btn]]:
+    return [buttons[i : i + cols] for i in range(0, len(buttons), cols)]
+
+
+def _back(data: str, text: str = "⬅️ Back") -> list[Btn]:
+    return [Btn(text=text, callback_data=data)]
+
+
+def main_menu_kb(has_access: bool, courses_dict: dict[str, str], ai_enabled: bool = True) -> InlineKeyboardMarkup:
+    # Big buttons for courses (1 per row) - locked if user hasn't paid
+    prefix = "📚 " if has_access else "🔒 "
+    rows = _grid([Btn(text=f"{prefix}{n}", callback_data=f"course:{c}") for c, n in courses_dict.items()], 1)
+    rows.append([Btn(text="📝 Past Exams", callback_data="exams")])
+    
+    if ai_enabled:
+        rows.append([Btn(text="🤖 Ask AI Tutor", callback_data="ask_ai:main")])
+    
+    bottom_row = [Btn(text="👤 My Profile", callback_data="user:profile"), Btn(text="❓ Help & FAQ", callback_data="user:help")]
+    rows.append(bottom_row)
+
+    if not has_access:
+        rows.append([Btn(text="💳 Pay to Unlock All Materials", callback_data="pay:start")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def course_menu_kb(code: str, ai_enabled: bool = True, available_cats: set[str] | None = None) -> InlineKeyboardMarkup:
+    # Only show categories that have at least 1 uploaded file
+    buttons = [
+        Btn(text=label, callback_data=f"cat:{code}:{key}")
+        for key, label in CATEGORIES.items()
+        if available_cats is None or key in available_cats
+    ]
+    rows = _grid(buttons, 1) if buttons else []
+    if ai_enabled:
+        rows.append([Btn(text="🤖 Ask AI Tutor", callback_data=f"ask_ai:{code}")])
+    rows.append(_back("menu:main"))
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def materials_kb(
+    items: Sequence[Material], has_access: bool, back: str, with_course: bool = False
+) -> InlineKeyboardMarkup:
+    rows = []
+    for m in items:
+        icon = "📄" if has_access else "🔒"
+        label = f"{icon} {m.course_code} · {m.title}" if with_course else f"{icon} {m.title}"
+        rows.append([Btn(text=label[:60], callback_data=f"mat:{m.id}")])
+    rows.append(_back(back))
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def exam_courses_kb(
+    courses_dict: dict[str, str], ai_enabled: bool = True, has_access: bool = True
+) -> InlineKeyboardMarkup:
+    # Big buttons for courses
+    prefix = "📚 " if has_access else "🔒 "
+    rows = _grid([Btn(text=f"{prefix}{n}", callback_data=f"ex:c:{c}") for c, n in courses_dict.items()], 1)
+    if ai_enabled:
+        rows.append([Btn(text="🤖 Ask AI Tutor", callback_data="ask_ai:exams")])
+    if not has_access:
+        rows.append([Btn(text="💳 Pay to Unlock All Materials", callback_data="pay:start")])
+    rows.append(_back("menu:main"))
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+
+def cancel_payment_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[_back("menu:main", "❌ Cancel")])
+
+
+def open_menu_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[Btn(text="📚 Open Menu", callback_data="menu:main")]])
+
+
+def admin_review_kb(payment_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                Btn(text="✅ Approve", callback_data=f"pay:ok:{payment_id}"),
+                Btn(text="❌ Reject", callback_data=f"pay:no:{payment_id}"),
+            ]
+        ]
+    )
+
