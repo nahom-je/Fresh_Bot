@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot.config import settings
 from bot.db import crud
-from bot.db.models import PaymentStatus
+from bot.db.models import PaymentStatus, Payment, User
 from bot.keyboards.inline import open_menu_kb
 from bot.keyboards.admin_kb import (
     admin_main_kb, admin_courses_kb, admin_categories_kb,
@@ -297,32 +297,74 @@ async def review_payment(cb: CallbackQuery, session: AsyncSession, bot: Bot) -> 
     if cb.from_user.id not in settings.admin_id_set:
         return await cb.answer("⛔ You're not authorized to review payments.", show_alert=True)
 
-    original_caption = cb.message.caption or ""
-    await cb.message.edit_caption(caption=f"{original_caption}\n\n⏳ <i>Processing...</i>", reply_markup=None)
-
-    _, action, pid = cb.data.split(":")
+    _, action, pid_str = cb.data.split(":")
+    pid = int(pid_str)
     approve = action == "ok"
-    payment = await crud.decide_payment(session, int(pid), PaymentStatus.APPROVED if approve else PaymentStatus.REJECTED, cb.from_user.id)
+
+    raw_caption = cb.message.caption or ""
+    # Strip any previous status suffix so we don't accumulate duplicates
+    base_caption = raw_caption.split("\n\n⏳")[0].split("\n\n✅")[0].split("\n\n❌")[0]
+
+    # Attempt to atomically move status from pending -> approved/rejected
+    payment = await crud.decide_payment(
+        session, pid, PaymentStatus.APPROVED if approve else PaymentStatus.REJECTED, cb.from_user.id
+    )
+
     if payment is None:
+        # Already decided by someone else or double-clicked
+        existing = await session.get(Payment, pid)
+        if existing:
+            reviewer = await session.get(User, existing.reviewed_by) if existing.reviewed_by else None
+            rev_label = f"@{escape(reviewer.username)}" if (reviewer and reviewer.username) else (escape(reviewer.full_name) if reviewer else "an admin")
+            status_text = "Approved" if existing.status == PaymentStatus.APPROVED.value else "Rejected"
+            icon = "✅" if status_text == "Approved" else "❌"
+            try:
+                await cb.message.edit_caption(
+                    caption=f"{base_caption}\n\n<b>{icon} {status_text} by {rev_label}</b>",
+                    reply_markup=None,
+                )
+            except TelegramAPIError:
+                pass
         return await cb.answer("This payment was already processed.", show_alert=True)
 
-    if approve:
-        await crud.verify_user(session, payment.telegram_id)
-    await session.commit()
-
-    label = "✅ Approved" if approve else "❌ Rejected"
-    await cb.message.edit_caption(caption=f"{original_caption}\n\n<b>{label} by {_admin_label(cb)}</b>", reply_markup=None)
-
-
-    if approve:
-        text = "🎉 <b>Payment approved!</b>\n\nFull access is unlocked — all modules, slides, notes and exams are yours."
-    else:
-        text = "❌ <b>We couldn't verify your payment.</b>\n\nPlease re-check your transaction details and tap 💳 Unlock Full Access to submit a clearer receipt."
+    # Show intermediate processing indicator
     try:
-        await bot.send_message(payment.telegram_id, text, reply_markup=open_menu_kb())
-    except (TelegramForbiddenError, TelegramAPIError):
+        await cb.message.edit_caption(caption=f"{base_caption}\n\n⏳ <i>Processing...</i>", reply_markup=None)
+    except TelegramAPIError:
         pass
-    await cb.answer("Done")
+
+    try:
+        if approve:
+            await crud.verify_user(session, payment.telegram_id)
+        await session.commit()
+
+        label = "✅ Approved" if approve else "❌ Rejected"
+        await cb.message.edit_caption(
+            caption=f"{base_caption}\n\n<b>{label} by {_admin_label(cb)}</b>",
+            reply_markup=None,
+        )
+
+        if approve:
+            text = "🎉 <b>Payment approved!</b>\n\nFull access is unlocked — all modules, slides, notes and exams are yours."
+        else:
+            text = "❌ <b>We couldn't verify your payment.</b>\n\nPlease re-check your transaction details and tap 💳 Unlock Full Access to submit a clearer receipt."
+        
+        try:
+            await bot.send_message(payment.telegram_id, text, reply_markup=open_menu_kb())
+        except (TelegramForbiddenError, TelegramAPIError) as e:
+            log.warning(f"Could not notify user {payment.telegram_id}: {e}")
+
+        await cb.answer("Done")
+    except Exception as e:
+        log.exception(f"Error while finalizing payment {pid}: {e}")
+        try:
+            await cb.message.edit_caption(
+                caption=f"{base_caption}\n\n⚠️ <i>Error processing. Please retry.</i>",
+                reply_markup=None,
+            )
+        except TelegramAPIError:
+            pass
+        await cb.answer("An error occurred while processing.", show_alert=True)
 
 # ---------- Course Management ----------
 from bot.keyboards.admin_kb import admin_course_management_kb, admin_edit_course_kb
